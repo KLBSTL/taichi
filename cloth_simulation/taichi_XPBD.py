@@ -1,11 +1,10 @@
-# ----- 原版 ----- #
-# ----- 半隐式方法 ----- #
+# ----- XPBD ----- #
 import taichi as ti
 from taichi import grouped
 
 ti.init(arch=ti.cuda)  # Alternatively, ti.init(arch=ti.cpu)
 
-n = 128
+n = 256
 mass = 1.0
 inv_m = 1.0 / mass
 quad_size = 1.0 / n

@@ -1,5 +1,4 @@
-# ----- 原版 ----- #
-# ----- 半隐式方法 ----- #
+# ----- PBD ----- #
 import taichi as ti
 from taichi import grouped
 
@@ -102,7 +101,7 @@ def update_x_pred():
         v_temp[i] += force * dt
     for i in grouped(v):
         v[i] += v_temp[i]
-        # x_pred[i] = x[i] + v[i] * dt
+        x_pred[i] = x[i] + v[i] * dt
 
 @ti.kernel
 def update_v():
@@ -154,8 +153,6 @@ def coll_v():
 @ti.kernel
 def update_x():
     for i in grouped(x):
-
-
         x[i] = x_pred[i]
 
 def substep():

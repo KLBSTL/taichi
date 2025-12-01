@@ -48,6 +48,7 @@ def initialize_mass_points():
         v[i, j] = [0, 0, 0]
         HK[i, j] = ti.Matrix.zero(ti.f32, 3, 3)
 
+
 @ti.kernel
 def initialize_mesh_indices():
     for i, j in ti.ndrange(n - 1, n - 1):
@@ -116,6 +117,7 @@ def iter_H():
 def iterate(A,b,x):
     new_x = x
     for _ in range(50):
+
         for i in range(iter_dim):
             r = b[i]
             for j in range(iter_dim):
@@ -123,8 +125,30 @@ def iterate(A,b,x):
                     r -= A[i, j] * new_x[j]
             new_x[i] = r / A[i, i]
 
-
     return new_x
+
+@ti.func
+def iterate_CG(A,b,x):
+    r0 = b - A @ x
+    p0 = r0
+    r_f = r0
+    for _ in range(50):
+
+        alpha = r0.dot(r0) / (p0.dot(A @ p0))
+        x += alpha * p0
+        r1 = r0 - alpha * (A @ p0)
+
+
+        if r1.norm() / r_f.norm() < 1e-5:
+            break
+
+        beta = r1.dot(r1) / (r0.dot(r0))
+        p1 = r1 + beta * p0
+
+        p0 = p1
+        r0 = r1
+
+    return x
 
 @ti.kernel
 def substep():

@@ -1,5 +1,4 @@
 # ----- 隐式方法 ----- #
-
 # ----- 共轭梯度法迭代 ----- #
 
 import taichi as ti
@@ -117,13 +116,15 @@ def iter_H():
 def iterate_CG(A,b,x):
     r0 = b - A @ x
     p0 = r0
+    r_f = r0
+    k = 0
     for _ in range(50):
-
+        k += 1
         alpha = r0.dot(r0) / (p0.dot(A @ p0))
         x += alpha * p0
         r1 = r0 - alpha * (A @ p0)
 
-        if r1.norm() < 1e-6:
+        if r1.norm() / r_f.norm() < 1e-5 or k > 10:
             break
 
         beta = r1.dot(r1) / (r0.dot(r0))

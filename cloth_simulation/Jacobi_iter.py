@@ -47,7 +47,26 @@ def iterate():
     for i in range(n):
         x[i] = new_x[i]
 
-
+# @ti.kernel
+# def iterate_CG(x : ti.template()):
+#     r0 = b - A @ x
+#     p0 = r0
+#     r_f = r0
+#     k = 0
+#     for _ in range(50):
+#         k += 1
+#         alpha = r0.dot(r0) / (p0.dot(A @ p0))
+#         x += alpha * p0
+#         r1 = r0 - alpha * (A @ p0)
+#
+#         if r1.norm() / r_f.norm() < 1e-5 or k > 10:
+#             break
+#
+#         beta = r1.dot(r1) / (r0.dot(r0))
+#         p1 = r1 + beta * p0
+#
+#         p0 = p1
+#         r0 = r1
 
 
 @ti.kernel
@@ -87,7 +106,7 @@ if __name__ == "__main__":
     print("开始 Jacobi 迭代求解 A x = b（n = {}）".format(n))
 
     for k in range(max_iters):
-        iterate()
+        iterate_CG(x)
         if (k + 1) % print_every == 0 or k == 0:
             res = math.sqrt(float(residual_sq()))
             print(f"iter {k+1:5d}, residual L2 = {res:.6e}")

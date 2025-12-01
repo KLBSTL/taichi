@@ -116,6 +116,7 @@ def iterate_CG(A,b,x):
     r0 = b - A @ x
     p0 = r0
     k = 0
+    r_f = r0
     for _ in range(50):
         k+=1
 
@@ -123,7 +124,7 @@ def iterate_CG(A,b,x):
         x += alpha * p0
         r1 = r0 - alpha * (A @ p0)
 
-        if r1.norm() < 1e-7:
+        if r1.norm() / r_f.norm() < 1e-5:
             break
 
         beta = r1.dot(r1) / (r0.dot(r0))
