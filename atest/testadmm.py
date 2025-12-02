@@ -15,7 +15,7 @@ substeps = int(1 / 60 // dt) // 40
 gravity = ti.Vector([0, -9.8, 0])
 spring_Y = 2e4
 dashpot_damping = 1e4
-drag_damping = 2
+drag_damping = 5
 ball_radius = 0.3
 
 # -------------------- Fields --------------------
@@ -44,7 +44,7 @@ r0 = ti.Vector.field(3, dtype=float, shape=(n, n))
 # Scalars
 re0 = ti.field(dtype=float, shape=(1,))
 re1 = ti.field(dtype=float, shape=(1,))
-row = spring_Y * dt * dt
+row = 10.0
 primal_res = ti.Vector.field(1, dtype=float, shape=(1,))
 primal_res_old = ti.Vector.field(1, dtype=float, shape=(1,))
 Dual_res = ti.Vector.field(1, dtype=float, shape=(1,))
@@ -60,8 +60,8 @@ def initialize_mass_points():
             j * quad_size - 0.5 + random_offset[1]
         ]
         x_pred[i, j] = x[i, j]
-        v[i, j] = ti.Vector([0.0,0.0,0.0])
-        u[i, j] = ti.Vector([0.0,0.0,0.0])
+        v[i, j] = [0, 0, 0]
+        u[i, j] = ti.Vector([0.0, 0.0, 0.0])  # 初始化 u
 
 @ti.kernel
 def initialize_mesh_indices():
@@ -200,71 +200,63 @@ def compute_add(pos : ti.template(),elem : ti.template()):
     for i in ti.grouped(pos):
         pos[i] += elem[i]
 
-
-alpha = 0.05
-
 # -------------------- Iteration --------------------
 @ti.kernel
 def iter_x_p():
-    primal_res_old[0] = 0.0
-    primal_res[0] = 0.0
+    primal_res_old[0] = ti.Vector([0.0])  # 修复类型
+    primal_res[0] = ti.Vector([0.0])  # 修复类型
+    
     for i in grouped(x):
         temp = x_p[i]
-        sum_n = ti.Vector([0.0,0.0,0.0])
-        count = 0
-        for off in ti.static(spring_offsets):
-            j = i + off
+        for spring_offset in ti.static(spring_offsets):
+            j = i + spring_offset
             if 0 <= j[0] < n and 0 <= j[1] < n:
-                # ADMM x-update: consider dual u
-                sum_n += x_p[j] + u[i]
-                count += 1
-        x_p[i] = (x_pred[i] + alpha * sum_n) / (1.0 + alpha * count)
-        # 更新残差平方和
-        primal_res_old[0] += (x_p[i] - temp).norm_sqr()
-
+                x_ij = x_p[i] - x_p[j] - u[i]
+                current_dist = x_ij.norm()
+                
+                # 防止除零错误
+                if current_dist < 1e-8:
+                    continue
+                
+                d = x_ij / current_dist  # 使用除法避免 normalized() 的问题
+                original_dist = quad_size * float(i - j).norm()
+                corre = 0.5 * (current_dist - original_dist) * d
+                x_p[i] -= corre
+                x_p[j] += corre
+                primal_res_old[0][0] += corre.dot(corre)  # 修复索引
+        primal_res[0][0] += (x_p[i] - temp).norm()  # 修复索引
 @ti.kernel
 def iter_u():
-    Dual_res[0] = 0.0
+    Dual_res[0] = ti.Vector([0.0])  # 修复类型
+    alpha = 0.01  # 更新步长
+    max_u_norm = 10.0  # 限制 u 的最大值，防止数值爆炸
+    
     for i in ti.grouped(u):
         temp = u[i]
-        for off in ti.static(spring_offsets):
-            j = i + off
-            if 0 <= j[0] < n and 0 <= j[1] < n:
-                C_ij = x_p[i] - x_p[j]
-                d = C_ij.normalized()
-                proj_ij = d * quad_size * (i - j).norm()  # 投影后的长度向量
-                u[i] += alpha * (C_ij - proj_ij)
-        Dual_res[0] += (u[i] - temp).norm_sqr()
+        delta = x_p[i] - x_pred[i]
+        u[i] += alpha * delta
+        
+        # 限制 u 的大小，防止数值爆炸
+        u_norm = u[i].norm()
+        if u_norm > max_u_norm:
+            u[i] = u[i] / u_norm * max_u_norm
+        
+        Dual_res[0][0] += (u[i] - temp).norm()  # 修复索引
 
 
-@ti.kernel
-def test_u()->ti.f32:
-    res = 0.0
-    for i in ti.grouped(u):
-        res += u[i].norm_sqr()
-    return ti.sqrt(res)
-
-@ti.kernel
-def low_u(res : ti.f32):
-    res_inv = 1.0 / res
-    for i in ti.grouped(u):
-        u[i] *= res_inv
 # -------------------- Substep --------------------
 def substep():
     update_x_pred()
     init_p()
-    for _ in range(10):
+    for _ in range(5):
         for _ in range(5):
             iter_x_p()  # 内部循环若需要，可多次
         iter_u()
         global_step()
         if test(): break
-    res = test_u()
-    if res > 10.0:
-        low_u(res)
     # coll_x()  # 先投影位置
     update_v()  # 再更新速度
-    coll_v()  # 应对剩余穿透
+    # coll_v()  # 应对剩余穿透
     update_x()
 
 
@@ -314,9 +306,15 @@ def compute_res(f: ti.template()) -> ti.f32:
     return res
 
 def test():
+    # 修复类型：primal_res[0] 是 Vector，需要访问 [0] 获取标量
+    primal_norm = primal_res[0][0] if hasattr(primal_res[0], '__getitem__') else primal_res[0]
+    primal_old_norm = primal_res_old[0][0] if hasattr(primal_res_old[0], '__getitem__') else primal_res_old[0]
+    dual_norm = Dual_res[0][0] if hasattr(Dual_res[0], '__getitem__') else Dual_res[0]
+    u_norm = compute_res(u)
+    
     return (
-        primal_res[0] / max(primal_res_old[0], 1e-12) < 1e-4
-        and Dual_res[0] / max(compute_res(u), 1e-12) < 1e-4
+        primal_norm * primal_norm / max(primal_old_norm, 1e-12) < 1e-4
+        and dual_norm * dual_norm / max(u_norm, 1e-12) < 1e-4
     )
 
 
@@ -327,18 +325,29 @@ def iterate_CG():
     compute_r0(b, Ap_vec, r0)
     compute(r_vec, r0)
     compute(p_vec, r_vec)
-    re0 = dot_product(r_vec, r_vec)
+    re0_val = dot_product(r_vec, r_vec)
+    r0_norm = re0_val
+    
+    if r0_norm < 1e-12:
+        return  # 已经收敛
 
     for _ in range(15):
         computeAp(p_vec)
-        alpha = dot_product(r_vec, r_vec) / dot_product(Ap_vec, p_vec)
+        pAp = dot_product(Ap_vec, p_vec)
+        if abs(pAp) < 1e-12:
+            break
+        
+        alpha = dot_product(r_vec, r_vec) / pAp
         axpy(x_p, alpha, p_vec)
         axpy(r_vec, -alpha, Ap_vec)
-        if dot_product(r_vec, r_vec) / dot_product(r0, r0) < 1e-4:
+        
+        re1_val = dot_product(r_vec, r_vec)
+        if re1_val / r0_norm < 1e-4:
             break
-        re1 = dot_product(r_vec, r_vec)
-        beta = re1 / re0
-        re0 = re1
+        
+        beta = re1_val / re0_val
+        re0_val = re1_val
+        
         axpy(p_vec, beta, p_vec)
         compute_add(p_vec, r_vec)
 
@@ -358,8 +367,8 @@ current_t = 0.0
 initialize_mass_points()
 
 while window.running:
-    if current_t > 1.0:  # Reset
-        initialize_mass_points()
+    if current_t > 0.7:  # Reset
+        initialize_mass_points()  # 这会重新初始化 u
         current_t = 0
 
     for i in range(substeps):

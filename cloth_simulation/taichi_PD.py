@@ -1,17 +1,18 @@
-# ----- Projective Dynamics ----- #
+import math
 import taichi as ti
 from taichi import grouped
 ti.init(arch=ti.cuda)  # Alternatively, ti.init(arch=ti.cpu)
 
-n = 256
+# ----------------- 模型参数 ----------------- #
+n = 64
 mass = 1.0
 inv_m = 1.0 / mass
 quad_size = 1.0 / n
 dt = 2e-2 / n
 inv_dt = 1 / dt
-substeps = int(1 / 60 // dt) // 40
+substeps = int(1 / 60 // dt) // 4
 gravity = ti.Vector([0, -9.8, 0])
-spring_Y = 6e4
+spring_Y = 1e5  # 作为 PD 中距离约束的权重
 dashpot_damping = 1e4
 drag_damping = 1
 
@@ -21,7 +22,7 @@ ball_center[0] = [0, 0, 0]
 
 x = ti.Vector.field(3, dtype=float, shape=(n, n))
 x_pred = ti.Vector.field(3,dtype=float,shape=(n,n))
-x_p = ti.Vector.field(3,dtype=float,shape=(n,n))
+x_p = ti.Vector.field(3,dtype=float,shape=(n,n))  # PD 中的当前解
 v = ti.Vector.field(3, dtype=float, shape=(n, n))
 
 num_triangles = (n - 1) * (n - 1) * 2
@@ -29,6 +30,7 @@ indices = ti.field(int, shape=num_triangles * 3)
 vertices = ti.Vector.field(3, dtype=float, shape=n * n)
 colors = ti.Vector.field(3, dtype=float, shape=n * n)
 
+# CG 用向量
 b = ti.Vector.field(3,dtype=float,shape=(n,n))
 x_vec = ti.Vector.field(3,dtype=float,shape=(n,n))
 p_vec = ti.Vector.field(3,dtype=float,shape=(n,n))
@@ -37,7 +39,6 @@ Ap_vec = ti.Vector.field(3,dtype=float,shape=(n,n))
 r0 = ti.Vector.field(3,dtype=float,shape=(n,n))
 re0 = ti.Vector.field(3,dtype=float,shape=(1))
 re1 = ti.Vector.field(3,dtype=float,shape=(1))
-
 
 v_temp = ti.Vector.field(3, dtype=float, shape=(n, n))
 
@@ -80,77 +81,108 @@ for i in range(-1, 2):
         if (i, j) != (0, 0):
             spring_offsets.append(ti.Vector([i, j]))
 
+# ----------------- 距离约束（PD）预计算 ----------------- #
+constraint_pairs_list = []
+constraint_rest_list = []
+for i in range(n):
+    for j in range(n):
+        vid_a = i * n + j
+        for off in spring_offsets:
+            # 只取一半，避免重复
+            if off[0] < 0 or (off[0] == 0 and off[1] < 0):
+                ni = i + int(off[0])
+                nj = j + int(off[1])
+                if 0 <= ni < n and 0 <= nj < n:
+                    vid_b = ni * n + nj
+                    rest = quad_size * math.sqrt(int(off[0]) ** 2 + int(off[1]) ** 2)
+                    constraint_pairs_list.append((vid_a, vid_b))
+                    constraint_rest_list.append(rest)
+
+num_constraints = len(constraint_pairs_list)
+constraint_pairs = ti.Vector.field(2, dtype=ti.i32, shape=num_constraints)
+constraint_rest_lengths = ti.field(dtype=ti.f32, shape=num_constraints)
+constraint_weights = ti.field(dtype=ti.f32, shape=num_constraints)
+constraint_goal = ti.Vector.field(3, dtype=ti.f32, shape=num_constraints)
+
+for idx, (a, b_idx) in enumerate(constraint_pairs_list):
+    constraint_pairs[idx] = [a, b_idx]
+    constraint_rest_lengths[idx] = constraint_rest_list[idx]
+    constraint_weights[idx] = spring_Y
+
 @ti.kernel
 def update_x_pred():
-    for i in grouped(v):
+    for i in grouped(x):
+        # 显式外力步得到 x_pred
         v[i] += gravity * dt
-        v_temp[i] = ti.Vector([0.0,0.0,0.0])
-    for i in ti.grouped(x):
-        force = ti.Vector([0.0, 0.0, 0.0])
-        for spring_offset in ti.static(spring_offsets):
-            j = i + spring_offset
-            if 0 <= j[0] < n and 0 <= j[1] < n:
-                x_ij = x[i] - x[j]
-                v_ij = v[i] - v[j]
-                d = x_ij.normalized()
-                current_dist = x_ij.norm()
-                original_dist = quad_size * float(i - j).norm()
-                force += -spring_Y * d * (current_dist / original_dist - 1)
-                force += -v_ij.dot(d) * d * dashpot_damping * quad_size
-
-        v_temp[i] += force * dt
-    for i in grouped(v):
-        v[i] += v_temp[i]
         x_pred[i] = x[i] + v[i] * dt
+        # v_temp[i] = ti.Vector([0.0,0.0,0.0])
+    # for i in ti.grouped(x):
+    #     force = ti.Vector([0.0, 0.0, 0.0])
+    #     for spring_offset in ti.static(spring_offsets):
+    #         j = i + spring_offset
+    #         if 0 <= j[0] < n and 0 <= j[1] < n:
+    #             x_ij = x[i] - x[j]
+    #             v_ij = v[i] - v[j]
+    #             d = x_ij.normalized()
+    #             current_dist = x_ij.norm()
+    #             original_dist = quad_size * float(i - j).norm()
+    #             force += -spring_Y * d * (current_dist / original_dist - 1)
+    #             force += -v_ij.dot(d) * d * dashpot_damping * quad_size
+
+        # v_temp[i] += force * dt
+    # for i in grouped(v):
+    #     v[i] += v_temp[i]
+    #     x_pred[i] = x[i] + v[i] * dt
 
 
 @ti.kernel
 def update_v():
     for i in grouped(v):
-        v[i] = (x_p[i] - x[i]) * inv_dt
+        v[i] = (x_p[i] - x[i]) / dt
 
 @ti.kernel
 def update_x():
     for i in grouped(x):
         x[i] = x_p[i]
 
-
 @ti.kernel
 def computeAp(p : ti.template()):
-    # A = H + M / (dt*dt)
-    # Ap = Mp + dt * dt * \sum_ (Ki * p)
-
+    # Ap = (M + Σ w A^T A) p
     for i in grouped(Ap_vec):
-        Ap_vec[i] = ti.Vector([0.0,0.0,0.0])
-    I = ti.Matrix.identity(ti.f32,3)
-    for i in ti.grouped(x):
-        for off in ti.static(spring_offsets):
+        Ap_vec[i] = mass * p[i]
 
-            j = i + off
-            if 0 <= j[0] < n and 0 <= j[1] < n:
-                Kii = spring_Y * I
-                Kij = -spring_Y * I
+    for c in range(num_constraints):
+        vid_i = constraint_pairs[c][0]
+        vid_j = constraint_pairs[c][1]
+        i0 = vid_i // n
+        i1 = vid_i % n
+        j0 = vid_j // n
+        j1 = vid_j % n
+        weight = constraint_weights[c]
 
-                Ap_vec[i] += dt * dt * (Kii @ p[i] + Kij @ p[j])
-                Ap_vec[j] += dt * dt * (Kij @ p[i] + Kii @ p[j])
-        Ap_vec[i] += mass * p[i]
+        diff = p[i0, i1] - p[j0, j1]
+        contribution = dt * dt * weight * diff
+        Ap_vec[i0, i1] += contribution
+        Ap_vec[j0, j1] -= contribution
 
 @ti.kernel
-def compute_b(p : ti.template()):
-    for i in ti.grouped(x):
-        # x_pred[i] = x[i] + dt * v[i] + dt*dt * gravity
+def compute_b():
+    # b = M x_pred + Σ w A^T d
+    for i in ti.grouped(b):
         b[i] = mass * x_pred[i]
 
-    I = ti.Matrix.identity(ti.f32, 3)
-    for i in ti.grouped(x):
-        for off in ti.static(spring_offsets):
-            j = i + off
-            if 0 <= j[0] < n and 0 <= j[1] < n:
-                Kii = spring_Y * I
-                Kij = -spring_Y * I
-
-                b[i] += dt*dt * (Kii @ p[i] + Kij @ p[j])
-                b[j] += dt*dt * (Kij @ p[i] + Kii @ p[j])
+    for c in range(num_constraints):
+        vid_i = constraint_pairs[c][0]
+        vid_j = constraint_pairs[c][1]
+        i0 = vid_i // n
+        i1 = vid_i % n
+        j0 = vid_j // n
+        j1 = vid_j % n
+        weight = constraint_weights[c]
+        goal = constraint_goal[c]
+        contribution = dt * dt * weight * goal
+        b[i0, i1] += contribution
+        b[j0, j1] -= contribution
 
 @ti.kernel
 def compute_r0(b: ti.template(), Ap: ti.template(), r: ti.template()):
@@ -161,7 +193,6 @@ def compute_r0(b: ti.template(), Ap: ti.template(), r: ti.template()):
 def compute(pos : ti.template(),fro : ti.template()):
     for i in ti.grouped(fro):
         pos[i] = fro[i]
-
 
 @ti.kernel
 def dot_product(a: ti.template(), b: ti.template()) -> ti.f32:
@@ -175,6 +206,10 @@ def axpy(x: ti.template(), alpha: ti.f32, p: ti.template()):
     for I in ti.grouped(x):
         x[I] += alpha * p[I]
 
+@ti.kernel
+def axpy2(x: ti.template(), alpha: ti.f32, p: ti.template()):
+    for I in ti.grouped(x):
+        x[I] = alpha * p[I]
 
 @ti.kernel
 def compute_norm(f: ti.template()) -> ti.f32:
@@ -188,21 +223,25 @@ def compute_add(pos : ti.template(),elem : ti.template()):
     for i in ti.grouped(pos):
         pos[i] += elem[i]
 
-
 def iterate_CG():
-    compute_b(x_p)
+    compute_b()
     computeAp(x_p)
     compute_r0(b,Ap_vec,r0)
     compute(r_vec,r0)
     compute(p_vec,r_vec)
     re0 = dot_product(r_vec,r_vec)
-    for _ in range(10):
+    it = 0
+    for _ in range(100):
+        it+=1
         computeAp(p_vec)
-        alpha = dot_product(r_vec,r_vec) / (dot_product(Ap_vec,p_vec))
+        denom = (dot_product(Ap_vec,p_vec))
+        if denom < 1e-8:
+            break
+        alpha = dot_product(r_vec,r_vec) / denom
         axpy(x_p,alpha,p_vec)
         axpy(r_vec,-alpha,Ap_vec)
 
-        if dot_product(r_vec,r_vec) / dot_product(r0,r0) < 1e-4:
+        if dot_product(r_vec,r_vec) / dot_product(r0,r0) < 1e-6:
             break
 
         re1 = dot_product(r_vec,r_vec)
@@ -210,13 +249,11 @@ def iterate_CG():
         beta = re1 / re0
         re0 = re1
 
-        axpy(p_vec,beta,p_vec)
+        axpy2(p_vec,beta,p_vec)
         compute_add(p_vec,r_vec)
-
 
 def global_step():
     iterate_CG()
-
 
 @ti.kernel
 def init_p():
@@ -232,8 +269,9 @@ def coll_v():
         off_norm = offset.norm()
         if off_norm <= ball_radius:
             normal = offset / off_norm
+            # x_p[i] = normal * (ball_radius) + ball_center[0]
             v[i] -= min(v[i].dot(normal), 0) * normal
-        x_p[i] += dt * v[i]
+        # x_p[i] += dt * v[i]
 
 @ti.kernel
 def coll_x():
@@ -244,34 +282,38 @@ def coll_x():
             x_p[i] =  normal * (ball_radius + 0.01) + ball_center[0]
 
 @ti.kernel
-def iter():
-    for i in grouped(x):
-        for spring_offset in ti.static(spring_offsets):
-            j = i + spring_offset
-            if 0 <= j[0] < n and 0 <= j[1] < n:
-                x_ij = x_p[i] - x_p[j]
-                d = x_ij.normalized()
-                current_dist = x_ij.norm()
-                original_dist = quad_size * float(i - j).norm()
+def local_step_pd():
+    # 对每个距离约束计算目标 d_c
+    for c in range(num_constraints):
+        vid_i = constraint_pairs[c][0]
+        vid_j = constraint_pairs[c][1]
+        i0 = vid_i // n
+        i1 = vid_i % n
+        j0 = vid_j // n
+        j1 = vid_j % n
+        diff = x_p[i0, i1] - x_p[j0, j1]
+        length = diff.norm()
+        direction = ti.Vector([0.0, 1.0, 0.0])
+        if length > 1e-6:
+            direction = diff / length
 
-                corre = 0.5 * (current_dist - original_dist) * d
-                x_p[i] -= corre
-                x_p[j] += corre
+        constraint_goal[c] = direction * constraint_rest_lengths[c]
+
+pd_iterations = 15
 
 def substep():
     update_x_pred()
     init_p()
-    for _ in range(5):
-        iter()
-    global_step()
+    for _ in range(pd_iterations):
+        local_step_pd()
+        global_step()
 
+    # 碰撞：先投影位置，再更新速度和速度碰撞响应
+    coll_x()
     update_v()
     coll_v()
-
-    # coll_x()
-    # update_v()
-
     update_x()
+
 
 @ti.kernel
 def update_vertices():

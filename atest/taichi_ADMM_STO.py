@@ -15,7 +15,7 @@ substeps = int(1 / 60 // dt) // 40
 gravity = ti.Vector([0, -9.8, 0])
 spring_Y = 2e4
 dashpot_damping = 1e4
-drag_damping = 2
+drag_damping = 5
 ball_radius = 0.3
 
 # -------------------- Fields --------------------
@@ -44,7 +44,7 @@ r0 = ti.Vector.field(3, dtype=float, shape=(n, n))
 # Scalars
 re0 = ti.field(dtype=float, shape=(1,))
 re1 = ti.field(dtype=float, shape=(1,))
-row = spring_Y * dt * dt
+row = 10.0
 primal_res = ti.Vector.field(1, dtype=float, shape=(1,))
 primal_res_old = ti.Vector.field(1, dtype=float, shape=(1,))
 Dual_res = ti.Vector.field(1, dtype=float, shape=(1,))
@@ -60,8 +60,7 @@ def initialize_mass_points():
             j * quad_size - 0.5 + random_offset[1]
         ]
         x_pred[i, j] = x[i, j]
-        v[i, j] = ti.Vector([0.0,0.0,0.0])
-        u[i, j] = ti.Vector([0.0,0.0,0.0])
+        v[i, j] = [0, 0, 0]
 
 @ti.kernel
 def initialize_mesh_indices():
@@ -200,71 +199,48 @@ def compute_add(pos : ti.template(),elem : ti.template()):
     for i in ti.grouped(pos):
         pos[i] += elem[i]
 
-
-alpha = 0.05
-
 # -------------------- Iteration --------------------
 @ti.kernel
 def iter_x_p():
     primal_res_old[0] = 0.0
+
     primal_res[0] = 0.0
     for i in grouped(x):
         temp = x_p[i]
-        sum_n = ti.Vector([0.0,0.0,0.0])
-        count = 0
-        for off in ti.static(spring_offsets):
-            j = i + off
+        for spring_offset in ti.static(spring_offsets):
+            j = i + spring_offset
             if 0 <= j[0] < n and 0 <= j[1] < n:
-                # ADMM x-update: consider dual u
-                sum_n += x_p[j] + u[i]
-                count += 1
-        x_p[i] = (x_pred[i] + alpha * sum_n) / (1.0 + alpha * count)
-        # 更新残差平方和
-        primal_res_old[0] += (x_p[i] - temp).norm_sqr()
-
+                x_ij = x_p[i] - x_p[j] - u[i]
+                d = x_ij.normalized()
+                current_dist = x_ij.norm()
+                original_dist = quad_size * float(i - j).norm()
+                corre = 0.5 * (current_dist - original_dist) * d
+                x_p[i] -= corre
+                x_p[j] += corre
+                primal_res_old[0] += corre.dot(corre)
+        primal_res[0] += (x_p[i] - temp).norm()
 @ti.kernel
 def iter_u():
     Dual_res[0] = 0.0
     for i in ti.grouped(u):
         temp = u[i]
-        for off in ti.static(spring_offsets):
-            j = i + off
-            if 0 <= j[0] < n and 0 <= j[1] < n:
-                C_ij = x_p[i] - x_p[j]
-                d = C_ij.normalized()
-                proj_ij = d * quad_size * (i - j).norm()  # 投影后的长度向量
-                u[i] += alpha * (C_ij - proj_ij)
-        Dual_res[0] += (u[i] - temp).norm_sqr()
+        u[i] += 0.01 * (x_p[i] - x_pred[i])
+        Dual_res[0] += (u[i] - temp).norm()
 
 
-@ti.kernel
-def test_u()->ti.f32:
-    res = 0.0
-    for i in ti.grouped(u):
-        res += u[i].norm_sqr()
-    return ti.sqrt(res)
-
-@ti.kernel
-def low_u(res : ti.f32):
-    res_inv = 1.0 / res
-    for i in ti.grouped(u):
-        u[i] *= res_inv
 # -------------------- Substep --------------------
 def substep():
     update_x_pred()
     init_p()
-    for _ in range(10):
+    for _ in range(5):
         for _ in range(5):
             iter_x_p()  # 内部循环若需要，可多次
         iter_u()
         global_step()
         if test(): break
-    res = test_u()
-    if res > 10.0:
-        low_u(res)
     # coll_x()  # 先投影位置
     update_v()  # 再更新速度
-    coll_v()  # 应对剩余穿透
+    # coll_v()  # 应对剩余穿透
     update_x()
 
 
@@ -315,8 +291,8 @@ def compute_res(f: ti.template()) -> ti.f32:
 
 def test():
     return (
-        primal_res[0] / max(primal_res_old[0], 1e-12) < 1e-4
-        and Dual_res[0] / max(compute_res(u), 1e-12) < 1e-4
+        primal_res[0]**2 / max(primal_res_old[0], 1e-12) < 1e-4
+        and Dual_res[0]**2 / max(compute_res(u), 1e-12) < 1e-4
     )
 
 
@@ -358,7 +334,7 @@ current_t = 0.0
 initialize_mass_points()
 
 while window.running:
-    if current_t > 1.0:  # Reset
+    if current_t > 0.7:  # Reset
         initialize_mass_points()
         current_t = 0
 

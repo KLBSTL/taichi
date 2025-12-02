@@ -201,7 +201,7 @@ def compute_add(pos : ti.template(),elem : ti.template()):
         pos[i] += elem[i]
 
 
-alpha = 0.05
+alpha = 0.1
 
 # -------------------- Iteration --------------------
 @ti.kernel
