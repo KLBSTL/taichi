@@ -112,28 +112,8 @@ for idx, (a, b_idx) in enumerate(constraint_pairs_list):
 @ti.kernel
 def update_x_pred():
     for i in grouped(x):
-        # 显式外力步得到 x_pred
         v[i] += gravity * dt
         x_pred[i] = x[i] + v[i] * dt
-        # v_temp[i] = ti.Vector([0.0,0.0,0.0])
-    # for i in ti.grouped(x):
-    #     force = ti.Vector([0.0, 0.0, 0.0])
-    #     for spring_offset in ti.static(spring_offsets):
-    #         j = i + spring_offset
-    #         if 0 <= j[0] < n and 0 <= j[1] < n:
-    #             x_ij = x[i] - x[j]
-    #             v_ij = v[i] - v[j]
-    #             d = x_ij.normalized()
-    #             current_dist = x_ij.norm()
-    #             original_dist = quad_size * float(i - j).norm()
-    #             force += -spring_Y * d * (current_dist / original_dist - 1)
-    #             force += -v_ij.dot(d) * d * dashpot_damping * quad_size
-
-        # v_temp[i] += force * dt
-    # for i in grouped(v):
-    #     v[i] += v_temp[i]
-    #     x_pred[i] = x[i] + v[i] * dt
-
 
 @ti.kernel
 def update_v():
@@ -147,7 +127,6 @@ def update_x():
 
 @ti.kernel
 def computeAp(p : ti.template()):
-    # Ap = (M + Σ w A^T A) p
     for i in grouped(Ap_vec):
         Ap_vec[i] = mass * p[i]
 

@@ -4,15 +4,15 @@ from taichi import grouped
 
 ti.init(arch=ti.opengl)  # Alternatively, ti.init(arch=ti.cpu)
 
-n = 128
+n = 256
 mass = 1.0
 inv_m = 1.0 / mass
 quad_size = 1.0 / n
-dt = 4e-2 / n
+dt = 2e-2 / n
 inv_dt = 1 / dt
-substeps = int(1 / 60 // dt) // 3
+substeps = int(1 / 60 // dt) // 10
 gravity = ti.Vector([0, -9.8, 0])
-spring_Y = 3e4
+spring_Y = 1e3
 dashpot_damping = 1e4
 drag_damping = 1
 
@@ -82,25 +82,8 @@ else:
 
 @ti.kernel
 def update_x_pred():
-    for i in grouped(v):
+    for i in grouped(x):
         v[i] += gravity * dt
-        v_temp[i] = [0.0,0.0,0.0]
-    for i in ti.grouped(x):
-        force = ti.Vector([0.0, 0.0, 0.0])
-        for spring_offset in ti.static(spring_offsets):
-            j = i + spring_offset
-            if 0 <= j[0] < n and 0 <= j[1] < n:
-                x_ij = x[i] - x[j]
-                v_ij = v[i] - v[j]
-                d = x_ij.normalized()
-                current_dist = x_ij.norm()
-                original_dist = quad_size * float(i - j).norm()
-                force += -spring_Y * d * (current_dist / original_dist - 1)
-                force += -v_ij.dot(d) * d * dashpot_damping * quad_size
-
-        v_temp[i] += force * dt
-    for i in grouped(v):
-        v[i] += v_temp[i]
         x_pred[i] = x[i] + v[i] * dt
 
 @ti.kernel
@@ -129,14 +112,15 @@ def iter():
                 ti.atomic_add(x_pred[j][2], dx[2])
 
 
+
 @ti.kernel
 def coll_x():
     for i in ti.grouped(x):
-        x_pred[i] = x[i] + v[i] * dt
         offset_to_center = x_pred[i] - ball_center[0]
-        if offset_to_center.norm() <= ball_radius + 0.01:
+        if offset_to_center.norm() <= ball_radius:
             normal = offset_to_center.normalized()
-            x_pred[i] =  normal * (ball_radius + 0.01) + ball_center[0]
+            x_pred[i] =  normal * (ball_radius) + ball_center[0]
+
 
 @ti.kernel
 def coll_v():
@@ -148,7 +132,7 @@ def coll_v():
             normal = offset_to_center.normalized()
             if normal.norm() > 0.1:
                 v[i] -= min(v[i].dot(normal), 0) * normal
-        x_pred[i] = x[i] + dt * v[i]
+        # x_pred[i] = x[i] + dt * v[i]
 
 @ti.kernel
 def update_x():
@@ -157,10 +141,11 @@ def update_x():
 
 def substep():
     update_x_pred()
-    for _ in range(4):
+    for _ in range(10):
         iter()
-    coll_v()
+    coll_x()
     update_v()
+    coll_v()
     update_x()
 
 @ti.kernel
