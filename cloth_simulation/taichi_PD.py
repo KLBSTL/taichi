@@ -138,7 +138,10 @@ def computeAp(p : ti.template()):
         j0 = vid_j // n
         j1 = vid_j % n
         weight = constraint_weights[c]
-
+        #  diff = A^T @ Ap  ->  A = [I  -I] , A^T @ A = [ I  -I]
+        #                                               [-I   I]
+        #  i +=  A^T @ A * [p_i  p_j]^T  =  p_i - p_j
+        #  j += p_i - p_j
         diff = p[i0, i1] - p[j0, j1]
         contribution = dt * dt * weight * diff
         Ap_vec[i0, i1] += contribution
@@ -276,6 +279,7 @@ def local_step_pd():
         if length > 1e-6:
             direction = diff / length
 
+        # 计算 投影位置 p
         constraint_goal[c] = direction * constraint_rest_lengths[c]
 
 pd_iterations = 15
