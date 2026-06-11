@@ -1,9 +1,9 @@
 import taichi as ti
 
-ti.init(arch=ti.gpu)
+ti.init(arch=ti.cuda)
 
-N = 12
-dt = 5e-5
+N = 32
+dt = 3e-3
 dx = 1 / N
 rho = 4e1
 NF = 2 * N**2  # number of faces
@@ -12,20 +12,17 @@ E, nu = 4e4, 0.2  # Young's modulus and Poisson's ratio
 mu, lam = E / 2 / (1 + nu), E * nu / (1 + nu) / (1 - 2 * nu)  # Lame parameters
 ball_pos, ball_radius = ti.Vector([0.5, 0.0]), 0.31
 damping = 14.5
-h = 0.001
 mass = 1.0
 
 pos = ti.Vector.field(2, float, NV)
+rest_pos = ti.Vector.field(2, float, NV)
 y = ti.Vector.field(2, float, NV)
 vel = ti.Vector.field(2, float, NV)
 f2v = ti.Vector.field(3, int, NF)  # ids of three vertices of each face
 B = ti.Matrix.field(2, 2, float, NF)
-APB = ti.Matrix.field(3, 2, float, NF)
 F = ti.Matrix.field(2, 2, float, NF, needs_grad=True)
 R = ti.Matrix.field(2, 2, float, NF)
 V = ti.field(float, NF)
-phi = ti.field(float, NF)  # potential energy of each face (Neo-Hookean)
-U = ti.field(float, (), needs_grad=True)  # total potential energy
 area = ti.field(float,NF)
 weight = ti.field(float,NF)
 
@@ -46,11 +43,13 @@ T = ti.Matrix([  [-1,-1 ],
                  [ 1, 0 ],
                  [ 0, 1 ]  ])
 
+fix = ti.field(ti.i32,NV)
+
 @ti.kernel
 def compute_F():
     for i in range(NF):
         ia, ib, ic = f2v[i]
-        a, b, c = pos[ia], pos[ib], pos[ic]
+        a, b, c = x_vec[ia], x_vec[ib], x_vec[ic]
         V[i] = abs((a - c).cross(b - c))
         D_i = ti.Matrix.cols([a - c, b - c])
         F[i] = D_i @ B[i]
@@ -58,9 +57,13 @@ def compute_F():
 
 @ti.kernel
 def init_pos():
+    fix.fill(1)
+    fix[N] = 0
+    fix[NV-1] = 0
     for i, j in ti.ndrange(N + 1, N + 1):
         k = i * (N + 1) + j
         pos[k] = ti.Vector([i, j]) / N * 0.25 + ti.Vector([0.45, 0.45])
+        rest_pos[k] = pos[k]
         vel[k] = ti.Vector([0, 0])
         y[k] = pos[k]
     for i in range(NF):
@@ -68,9 +71,8 @@ def init_pos():
         a, b, c = pos[ia], pos[ib], pos[ic]
         B_i_inv = ti.Matrix.cols([a - c, b - c])
         B[i] = B_i_inv.inverse()
-        APB[i] = T @ B[i]
-        area[i] = dx * dx / 2
-        weight[i] = area[i] * h * lam
+        area[i] = ti.abs(B_i_inv.determinant()) * 0.5
+        weight[i] = area[i] * mu * 2
 
 
 @ti.kernel
@@ -94,20 +96,23 @@ def paint_phi(gui):
 @ti.kernel
 def predict():
     for i in ti.grouped(pos):
-        y[i] = pos[i] + vel[i] * dt + dt * dt * gravity[None][1]
+        if fix[i] == 0:
+            vel[i] = ti.Vector([0.0, 0.0])
+            y[i] = rest_pos[i]
+        else:
+            vel[i] += gravity[None] * dt
+            y[i] = pos[i] + vel[i] * dt
 
 
 @ti.kernel
 def compute_SVD():
     for temp in ti.grouped(F):
-        # temp is ti.Matrix(2, 2)
         S = F[temp].transpose() @ F[temp]
 
         s00 = S[0, 0]
         s01 = S[0, 1]
         s11 = S[1, 1]
 
-        # eigenvalues of S
         tau = s00 + s11
         delta = s00 - s11
         r = ti.sqrt(delta * delta + 4.0 * s01 * s01)
@@ -118,7 +123,6 @@ def compute_SVD():
         sigma1 = ti.sqrt(lambda1)
         sigma2 = ti.sqrt(lambda2)
 
-        # eigenvectors (V)
         v1 = ti.Vector([1.0, 0.0])
         if ti.abs(s01) > 1e-8:
             v1 = ti.Vector([lambda1 - s11, s01])
@@ -129,7 +133,6 @@ def compute_SVD():
 
         V = ti.Matrix.cols([v1, v2])
 
-        # U = F V Σ^{-1}
         inv_sigma1 = 1.0 / sigma1 if sigma1 > 1e-8 else 0.0
         inv_sigma2 = 1.0 / sigma2 if sigma2 > 1e-8 else 0.0
 
@@ -146,37 +149,59 @@ def compute_SVD():
 
         R[temp] = U @ V.transpose()
 
-
-
 def local_step_pd():
     compute_F()
     compute_SVD()
 
 def global_step():
-    init_x_vec()
     iterate_CG()
 
+@ti.kernel
 def init_x_vec():
-    for i in ti.grouped(pos):
-        x_vec[i] = pos[i]
+    for i in ti.grouped(y):
+        x_vec[i] = y[i]
 
-def update_weight():
-    i = 0
+@ti.kernel
+def update_vx():
+    for i in ti.grouped(vel):
+        if fix[i] == 0:
+            pos[i] = rest_pos[i]
+            vel[i] = ti.Vector([0.0, 0.0])
+        else:
+            vel[i] = (x_vec[i] - pos[i]) / dt  # * ti.exp(-dt * damping)
+            pos[i] = x_vec[i]
 
-pd_iterations = 10
+def coll():
+    for i in range(NV):
+        disp = pos[i] - ball_pos
+        disp2 = disp.norm_sqr()
+        if disp2 <= ball_radius**2:
+            NoV = vel[i].dot(disp)
+            if NoV < 0:
+                vel[i] -= NoV * disp / disp2
+        cond = (pos[i] < 0) & (vel[i] < 0) | (pos[i] > 1) & (vel[i] > 0)
+        for j in ti.static(range(pos.n)):
+            if cond[j]:
+                vel[i][j] = 0
+
+pd_iterations = 2
 
 def substep():
+    predict()
+    init_x_vec()
+    project_fix()
     for _ in range(pd_iterations):
-        predict()
         local_step_pd()
         global_step()
+        project_fix()
+    update_vx()
+    # coll()
 
-    update_weight()
-    # coll_x()
-    # update_v()
-    # coll_v()
-    # update_x()
-
+@ti.kernel
+def project_fix():
+    for i in ti.grouped(x_vec):
+        if fix[i] == 0:
+            x_vec[i] = rest_pos[i]
 
 @ti.kernel
 def computeAp(p : ti.template()):
@@ -184,11 +209,22 @@ def computeAp(p : ti.template()):
         Ap_vec[i] = mass * p[i]
     for i in ti.ndrange(NF):
         ia,ib,ic = f2v[i]
-        q =  APB[i] @ [p[ia],p[ib],p[ic]]
-        f_a,f_b,f_c = dt * dt * weight[i] * (APB[i].transpose() @ q)
-        Ap_vec[ia] += f_a
-        Ap_vec[ib] += f_b
-        Ap_vec[ic] += f_c
+
+        w = dt * dt * weight[i]
+
+        pa,pb,pc = p[ia],p[ib],p[ic]
+
+        Ds = ti.Matrix.cols([pa-pc,pb-pc])
+        BTB = B[i] @ B[i].transpose()
+        Res = Ds @ BTB
+
+        f_a = ti.Vector([Res[0,0],Res[1,0]])
+        f_b = ti.Vector([Res[0,1], Res[1, 1]])
+        f_c = -f_a - f_b
+
+        Ap_vec[ia] += w * f_a
+        Ap_vec[ib] += w * f_b
+        Ap_vec[ic] += w * f_c
 
 
 
@@ -200,10 +236,16 @@ def compute_b():
     for i in ti.ndrange(NF):
         ia,ib,ic = f2v[i]
 
-        contrib = dt * dt * weight[i] * APB[i].transpose() @ R[i]
-        b[ia] += contrib[0]
-        b[ib] += contrib[1]
-        b[ic] += contrib[2]
+        w = dt * dt * weight[i]
+
+        G = R[i] @ B[i].transpose()
+        g_a = ti.Vector([G[0,0],G[1,0]]) # 第0列
+        g_b = ti.Vector([G[0,1], G[1,1]]) # 第1列
+        g_c = -g_a - g_b
+
+        b[ia] += w * g_a
+        b[ib] += w * g_b
+        b[ic] += w * g_c
 
 
 @ti.kernel
@@ -245,34 +287,45 @@ def compute_add(pos : ti.template(),elem : ti.template()):
     for i in ti.grouped(pos):
         pos[i] += elem[i]
 
+@ti.kernel
+def zero_fixed(v: ti.template()):
+    for i in ti.grouped(v):
+        if fix[i] == 0:
+            v[i] = ti.Vector([0.0, 0.0])
+
 def iterate_CG():
     compute_b()
     computeAp(x_vec)
     compute_r0(b,Ap_vec,r0)
+    zero_fixed(r0)
+    r_init = dot_product(r0,r0)
+    if r_init < 1e-10:
+        return
     compute(r_vec,r0)
     compute(p_vec,r_vec)
-    re0 = dot_product(r_vec,r_vec)
-    it = 0
-    for _ in range(100):
-        it+=1
+    re0 = r_init
+    for _ in range(10):
         computeAp(p_vec)
-        denom = (dot_product(Ap_vec,p_vec))
+        denom = dot_product(Ap_vec,p_vec)
         if denom < 1e-8:
             break
-        alpha = dot_product(r_vec,r_vec) / denom
+        rr = dot_product(r_vec,r_vec)
+        alpha = rr / denom
         axpy(x_vec,alpha,p_vec)
+        project_fix()
         axpy(r_vec,-alpha,Ap_vec)
-
-        if dot_product(r_vec,r_vec) / dot_product(r0,r0) < 1e-6:
-            break
+        zero_fixed(r_vec)
 
         re1 = dot_product(r_vec,r_vec)
+        if re1 / r_init < 1e-6:
+            break
 
         beta = re1 / re0
         re0 = re1
 
         axpy2(p_vec,beta,p_vec)
         compute_add(p_vec,r_vec)
+        zero_fixed(p_vec)
 
 
 def main():
@@ -285,14 +338,12 @@ def main():
         mouse_pos = gui.get_cursor_pos()
         attractor_pos[None] = mouse_pos
         attractor_strength[None] = gui.is_pressed(gui.LMB) - gui.is_pressed(gui.RMB)
-        for i in range(50):
-            with ti.ad.Tape(loss=U):
-                # U[None] = 0.0
-                substep()
+        for i in range(5):
+            substep()
         paint_phi(gui)
-        gui.circle(mouse_pos, radius=15, color=0x336699)
-        gui.circle(ball_pos, radius=ball_radius * 512, color=0x666666)
-        gui.circles(pos.to_numpy(), radius=2, color=0xFFAA33)
+        # gui.circle(mouse_pos, radius=15, color=0x336699)
+        # gui.circle(ball_pos, radius=ball_radius * 512, color=0x666666)
+        gui.circles(pos.to_numpy(), radius=1.5, color=0xFFAA33)
         gui.show()
 
 

@@ -3,7 +3,7 @@ import taichi as ti
 ti.init(arch=ti.gpu)
 
 N = 12
-dt = 5e-4
+dt = 5e-5
 dx = 1 / N
 rho = 4e1
 NF = 2 * N**2  # number of faces
@@ -65,8 +65,6 @@ def advance():
         for j in ti.static(range(pos.n)):
             if cond[j]:
                 vel[i][j] = 0
-        if i == 12 or i == NV-1:
-            vel[i] = 0
         pos[i] += dt * vel[i]
 
 
@@ -133,12 +131,11 @@ def main():
         attractor_strength[None] = gui.is_pressed(gui.LMB) - gui.is_pressed(gui.RMB)
         for i in range(50):
             with ti.ad.Tape(loss=U):
-                # U[None] = 0.0
                 update_U()
             advance()
         paint_phi(gui)
         gui.circle(mouse_pos, radius=15, color=0x336699)
-        #gui.circle(ball_pos, radius=ball_radius * 512, color=0x666666)
+        gui.circle(ball_pos, radius=ball_radius * 512, color=0x666666)
         gui.circles(pos.to_numpy(), radius=2, color=0xFFAA33)
         gui.show()
 
